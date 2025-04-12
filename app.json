@@ -8,6 +8,11 @@
     },
     "ios": {
       "bundleIdentifier": "com.mailswap.teralink"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d12f48d8-2e48-4f48-a4af-f8ed5e26e7a8"
+      }
     }
   }
 }
