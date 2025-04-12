@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   StyleSheet,
@@ -14,16 +14,93 @@ import {
   Keyboard,
 } from 'react-native';
 import Video from 'react-native-video';
+import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
+
+// Custom Animated Alert Component
+const AnimatedAlert = ({ message, visible, onClose }) => {
+  const opacity = useSharedValue(0);
+  const translateY = useSharedValue(50);
+  const scale = useSharedValue(0.9);
+  const shadowOpacity = useSharedValue(0);
+  const buttonScale = useSharedValue(1);
+
+  // Auto-dismiss after 3 seconds
+  useEffect(() => {
+    let timeout;
+    if (visible) {
+      timeout = setTimeout(() => {
+        onClose();
+      }, 3000); // 3 seconds
+    }
+    return () => clearTimeout(timeout);
+  }, [visible, onClose]);
+
+  React.useEffect(() => {
+    if (visible) {
+      opacity.value = withTiming(1, { duration: 400, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      translateY.value = withTiming(0, { duration: 400, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      scale.value = withTiming(1, { duration: 400, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      shadowOpacity.value = withTiming(0.5, { duration: 400 });
+    } else {
+      opacity.value = withTiming(0, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      translateY.value = withTiming(50, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      scale.value = withTiming(0.9, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      shadowOpacity.value = withTiming(0, { duration: 300 });
+    }
+  }, [visible]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [
+      { translateY: translateY.value },
+      { scale: scale.value },
+    ],
+    shadowOpacity: shadowOpacity.value,
+  }));
+
+  const buttonAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: buttonScale.value }],
+  }));
+
+  const handlePressIn = () => {
+    buttonScale.value = withTiming(0.95, { duration: 100 });
+  };
+
+  const handlePressOut = () => {
+    buttonScale.value = withTiming(1, { duration: 100 });
+  };
+
+  if (!visible && opacity.value === 0) return null;
+
+  return (
+    <AnimatedReanimated.View style={[styles.alertContainer, animatedStyle]}>
+      <Text style={styles.alertText}>{message}</Text>
+      <AnimatedReanimated.View style={[styles.alertCloseButton, buttonAnimatedStyle]}>
+        <TouchableOpacity
+          onPress={onClose}
+          onPressIn={handlePressIn}
+          onPressOut={handlePressOut}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.alertCloseText}>✕</Text>
+        </TouchableOpacity>
+      </AnimatedReanimated.View>
+    </AnimatedReanimated.View>
+  );
+};
 
 const PlayScreen = () => {
   const [inputLink, setInputLink] = useState('');
-  const [isLoading, setIsLoading] = useState(false); // General loading (e.g., Get Video)
-  const [isVideoLoading, setIsVideoLoading] = useState(false); // Video-specific loading
+  const [isLoading, setIsLoading] = useState(false);
+  const [isVideoLoading, setIsVideoLoading] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [selectedQuality, setSelectedQuality] = useState(null);
   const [showVideo, setShowVideo] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [alertMessage, setAlertMessage] = useState('');
+  const [showAlert, setShowAlert] = useState(false);
+  const [isInputInvalid, setIsInputInvalid] = useState(false); // New state for input highlight
   const dropdownAnimation = useRef(new Animated.Value(0)).current;
 
   // Mock quality options (replace with backend data in production)
@@ -63,13 +140,31 @@ const PlayScreen = () => {
     toggleDropdown();
   };
 
+  // Validate TeraBox link
+  const isValidTeraBoxLink = (link) => {
+    // Basic check for TeraBox or TeraShare links
+    const lowerCaseLink = link.toLowerCase();
+    return lowerCaseLink.includes('terabox') || lowerCaseLink.includes('terashare');
+  };
+
   // Mock function to simulate link submission
   const handleGetVideo = () => {
     if (!inputLink) {
-      alert('Please enter a TeraBox link');
+      setAlertMessage('Please enter a TeraBox link');
+      setShowAlert(true);
+      setIsInputInvalid(true); // Highlight input
+      setInputLink(''); // Clear input
       return;
     }
-    Keyboard.dismiss(); // Remove cursor from input
+    if (!isValidTeraBoxLink(inputLink)) {
+      setAlertMessage('Please enter a valid TeraBox link');
+      setShowAlert(true);
+      setIsInputInvalid(true); // Highlight input
+      setInputLink(''); // Clear input
+      return;
+    }
+    setIsInputInvalid(false); // Clear highlight on valid link
+    Keyboard.dismiss();
     setIsLoading(true);
     setIsVideoLoading(true);
     setErrorMessage('');
@@ -79,6 +174,14 @@ const PlayScreen = () => {
       setIsLoading(false);
       setIsVideoLoading(false);
     }, 1000);
+  };
+
+  // Clear highlight when user starts typing
+  const handleInputChange = (text) => {
+    setInputLink(text);
+    if (isInputInvalid) {
+      setIsInputInvalid(false);
+    }
   };
 
   // Mock download toggle
@@ -108,6 +211,7 @@ const PlayScreen = () => {
     setIsVideoLoading(false);
     setIsDownloading(false);
     setShowDropdown(false);
+    setIsInputInvalid(false); // Clear highlight
     dropdownAnimation.setValue(0);
   };
 
@@ -125,11 +229,11 @@ const PlayScreen = () => {
           {/* Input Section */}
           <View style={styles.inputContainer}>
             <TextInput
-              style={styles.input}
+              style={[styles.input, isInputInvalid && styles.inputInvalid]}
               placeholder="Paste TeraBox link here"
               placeholderTextColor="#888"
               value={inputLink}
-              onChangeText={setInputLink}
+              onChangeText={handleInputChange}
               autoCapitalize="none"
               returnKeyType="done"
             />
@@ -220,7 +324,7 @@ const PlayScreen = () => {
                 />
                 {isVideoLoading && (
                   <View style={styles.videoLoadingOverlay}>
-                    <ActivityIndicator size="large" color="#007AFF" />
+                    <ActivityIndicator size="large" color="#FFFFFF" />
                   </View>
                 )}
               </View>
@@ -242,10 +346,16 @@ const PlayScreen = () => {
           )}
         </ScrollView>
 
+        <AnimatedAlert
+          message={alertMessage}
+          visible={showAlert}
+          onClose={() => setShowAlert(false)}
+        />
+
         {isLoading && (
           <ActivityIndicator
             size="large"
-            color="#007AFF"
+            color="#FFFFFF"
             style={styles.loadingIndicator}
           />
         )}
@@ -291,6 +401,10 @@ const styles = StyleSheet.create({
     borderColor: '#333',
     width: '100%',
     marginBottom: 15,
+  },
+  inputInvalid: {
+    borderColor: '#FF5252', // Red border for invalid input
+    borderWidth: 2,
   },
   submitButton: {
     backgroundColor: '#007AFF',
@@ -435,6 +549,56 @@ const styles = StyleSheet.create({
     top: '50%',
     left: '50%',
     transform: [{ translateX: -25 }, { translateY: -25 }],
+  },
+  alertContainer: {
+    position: 'absolute',
+    top: '35%',
+    left: 20,
+    right: 20,
+    backgroundColor: 'rgba(30, 30, 30, 0.92)',
+    borderRadius: 16,
+    padding: 25,
+    paddingTop: 35,
+    minHeight: 120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+    shadowColor: '#FF5252',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 82, 82, 0.3)',
+  },
+  alertText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+    maxWidth: '80%',
+  },
+  alertCloseButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: '#E53935',
+    borderRadius: 16,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  alertCloseText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    lineHeight: 22,
   },
 });
 
