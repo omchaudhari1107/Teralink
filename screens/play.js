@@ -145,7 +145,7 @@ const PlayScreen = () => {
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-                <Text style={styles.nextButtonText}>→ Next</Text>
+                <Text style={styles.nextButtonText}>Convert Next Video</Text>
               </TouchableOpacity>
             )}
           </View>
