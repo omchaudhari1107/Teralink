@@ -13,12 +13,13 @@ import {
   StatusBar,
   Modal,
   ProgressBarAndroid,
+  Clipboard, // NEW: Added Clipboard for paste functionality
 } from 'react-native';
 import Video from 'react-native-video';
 import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import RNFS from 'react-native-fs';
 
-// Animated Alert Component (unchanged)
+// AnimatedAlert Component (unchanged)
 const AnimatedAlert = ({ message, visible, onClose }) => {
   const opacity = useSharedValue(0);
   const translateY = useSharedValue(50);
@@ -115,6 +116,12 @@ const PlayScreen = () => {
   const lastUpdateTime = useRef(0);
   const lastDownloadedBytes = useRef(0);
   const isUserCancelled = useRef(false);
+  const retryCount = useRef(0); // NEW: Track retry attempts
+
+  // NEW: Convert bytes to Mbps
+  const bytesToMbps = (bytes) => {
+    return (((bytes * 8) / 1e6)).toFixed(2);
+  };
 
   // Process long or proxied URLs (unchanged)
   const processLink = (link) => {
@@ -238,6 +245,24 @@ const PlayScreen = () => {
     }
   };
 
+  // NEW: Handle paste from clipboard
+  const handlePaste = async () => {
+    try {
+      const clipboardContent = await Clipboard.getString();
+      if (clipboardContent) {
+        setInputLink(clipboardContent);
+        setIsInputInvalid(false);
+      } else {
+        setAlertMessage('Clipboard is empty');
+        setShowAlert(true);
+      }
+    } catch (error) {
+      console.error('Paste error:', error);
+      setAlertMessage('Failed to paste from clipboard');
+      setShowAlert(true);
+    }
+  };
+
   // Handle Play button (unchanged)
   const handlePlay = () => {
     if (!videoUrl) {
@@ -252,7 +277,7 @@ const PlayScreen = () => {
   };
 
   // Handle Download button with retry logic
-  const handleDownload = async () => {
+  const handleDownload = async (retries = 2) => {
     if (!inputLink) {
       setErrorMessage('No link available for download');
       return;
@@ -299,18 +324,22 @@ const PlayScreen = () => {
         lastUpdateTime.current = Date.now();
         lastDownloadedBytes.current = 0;
         isUserCancelled.current = false;
+        retryCount.current = 0; // Reset retry count
 
         const download = RNFS.downloadFile({
           fromUrl: downloadUrl,
           toFile: destinationPath,
           background: true,
-          discretionary: true,
+          cacheable: true, // NEW: Enable caching
+          connectionTimeout: 15000, // NEW: Set connection timeout
+          readTimeout: 15000, // NEW: Set read timeout
+          progressDivider: 10, // NEW: Update progress every 10%
           progress: (res) => {
             const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
             const currentTime = Date.now();
             const timeDiff = (currentTime - lastUpdateTime.current) / 1000;
             const bytesDiff = res.bytesWritten - lastDownloadedBytes.current;
-            const speed = timeDiff > 0 ? (bytesDiff / timeDiff) / 1e3 : 0;
+            const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
 
             setDownloadProgress(progress);
             setDownloadedBytes(res.bytesWritten);
@@ -334,15 +363,22 @@ const PlayScreen = () => {
             setIsDownloading(false);
             downloadJobId.current = null;
           })
-          .catch((err) => {
+          .catch(async (err) => {
             console.error('Download failed:', err);
-            if (!isUserCancelled.current) {
-              setShowDownloadModal(false);
-              setErrorMessage(`Download failed: ${err.message}`);
-              setShowAlert(true);
+            if (!isUserCancelled.current && retries > 0) {
+              console.log(`Retrying download... (${retries} retries left)`);
+              retryCount.current += 1;
+              await new Promise((resolve) => setTimeout(resolve, 2000)); // 2-second delay
+              handleDownload(retries - 1); // Retry
+            } else {
+              if (!isUserCancelled.current) {
+                setShowDownloadModal(false);
+                setErrorMessage(`Download failed: ${err.message}`);
+                setShowAlert(true);
+              }
+              setIsDownloading(false);
+              downloadJobId.current = null;
             }
-            setIsDownloading(false);
-            downloadJobId.current = null;
           });
       } else {
         throw new Error('No download URL returned');
@@ -355,12 +391,12 @@ const PlayScreen = () => {
     }
   };
 
-  // Show cancel confirmation modal
+  // Show cancel confirmation modal (unchanged)
   const requestCancelDownload = () => {
     setShowCancelConfirmModal(true);
   };
 
-  // Confirm and cancel download
+  // Confirm and cancel download (unchanged)
   const confirmCancelDownload = () => {
     if (downloadJobId.current) {
       isUserCancelled.current = true;
@@ -374,12 +410,10 @@ const PlayScreen = () => {
     setDownloadSpeed(0);
     setTotalBytes(0);
     downloadJobId.current = null;
-    // setAlertMessage('Download cancelled');
-    // setShowAlert(true);
-    // setErrorMessage('');
+    setErrorMessage('');
   };
 
-  // Dismiss cancel confirmation
+  // Dismiss cancel confirmation (unchanged)
   const dismissCancelConfirm = () => {
     setShowCancelConfirmModal(false);
   };
@@ -391,7 +425,7 @@ const PlayScreen = () => {
     setIsVideoLoading(false);
   };
 
-  // Handle "Next" button press to reset the screen (modified to handle cancel confirmation)
+  // Handle "Next" button press to reset the screen (unchanged)
   const handleNext = () => {
     if (isDownloading) {
       requestCancelDownload();
@@ -418,15 +452,20 @@ const PlayScreen = () => {
 
           {/* Input Section */}
           <View style={styles.inputContainer}>
-            <TextInput
-              style={[styles.input, isInputInvalid && styles.inputInvalid]}
-              placeholder="Paste TeraBox link here"
-              placeholderTextColor="#888"
-              value={inputLink}
-              onChangeText={handleInputChange}
-              autoCapitalize="none"
-              returnKeyType="done"
-            />
+            <View style={styles.inputWrapper}>
+              <TextInput
+                style={[styles.input, isInputInvalid && styles.inputInvalid]}
+                placeholder="Paste TeraBox link here"
+                placeholderTextColor="#888"
+                value={inputLink}
+                onChangeText={handleInputChange}
+                autoCapitalize="none"
+                returnKeyType="done"
+              />
+              <TouchableOpacity style={styles.pasteButton} onPress={handlePaste}>
+                <Text style={styles.pasteButtonText}>Paste</Text>
+              </TouchableOpacity>
+            </View>
             {!videoData ? (
               <TouchableOpacity
                 style={[styles.submitButton, isLoading && styles.buttonDisabled]}
@@ -457,7 +496,7 @@ const PlayScreen = () => {
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.downloadButton, isDownloading && styles.buttonDisabled]}
-                  onPress={handleDownload}
+                  onPress={() => handleDownload(2)} // Start with 2 retries
                   disabled={isDownloading}
                 >
                   <Text style={styles.buttonText}>{isDownloading ? 'Downloading...' : 'Download'}</Text>
@@ -512,7 +551,7 @@ const PlayScreen = () => {
               <Text style={styles.statusText}>
                 Downloaded: {bytesToMB(downloadedBytes)} MB / {bytesToMB(totalBytes)} MB
               </Text>
-              <Text style={styles.statusText}>Speed: {downloadSpeed.toFixed(2)} KB/s</Text>
+              <Text style={styles.statusText}>Speed: {bytesToMbps(downloadSpeed)} Mbps</Text>
               <TouchableOpacity style={styles.cancelButton} onPress={requestCancelDownload}>
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
@@ -574,6 +613,12 @@ const styles = StyleSheet.create({
     marginBottom: 30,
     alignItems: 'center',
   },
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    marginBottom: 15,
+  },
   input: {
     backgroundColor: '#1E1E1E',
     color: '#fff',
@@ -582,12 +627,25 @@ const styles = StyleSheet.create({
     fontSize: 16,
     borderWidth: 1,
     borderColor: '#333',
-    width: '100%',
-    marginBottom: 15,
+    flex: 1,
+    marginRight: 10,
   },
   inputInvalid: {
     borderColor: '#FF5252',
     borderWidth: 2,
+  },
+  pasteButton: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 15,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pasteButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   submitButton: {
     backgroundColor: '#007AFF',
