@@ -6,36 +6,39 @@ import {
   TouchableOpacity,
   Text,
   ActivityIndicator,
-  Platform,
   KeyboardAvoidingView,
   SafeAreaView,
-  Animated,
   ScrollView,
   Keyboard,
+  StatusBar,
+  Modal,
+  ProgressBarAndroid,
 } from 'react-native';
 import Video from 'react-native-video';
 import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
+import RNFS from 'react-native-fs';
 
-// Custom Animated Alert Component
+// Animated Alert Component
 const AnimatedAlert = ({ message, visible, onClose }) => {
   const opacity = useSharedValue(0);
   const translateY = useSharedValue(50);
   const scale = useSharedValue(0.9);
   const shadowOpacity = useSharedValue(0);
   const buttonScale = useSharedValue(1);
+  const [isHidden, setIsHidden] = useState(!visible);
 
-  // Auto-dismiss after 3 seconds
   useEffect(() => {
     let timeout;
     if (visible) {
+      setIsHidden(false);
       timeout = setTimeout(() => {
         onClose();
-      }, 3000); // 3 seconds
+      }, 3000);
     }
     return () => clearTimeout(timeout);
   }, [visible, onClose]);
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (visible) {
       opacity.value = withTiming(1, { duration: 400, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
       translateY.value = withTiming(0, { duration: 400, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
@@ -45,16 +48,17 @@ const AnimatedAlert = ({ message, visible, onClose }) => {
       opacity.value = withTiming(0, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
       translateY.value = withTiming(50, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
       scale.value = withTiming(0.9, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
-      shadowOpacity.value = withTiming(0, { duration: 300 });
+      shadowOpacity.value = withTiming(0, { duration: 300, easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
+      const timeout = setTimeout(() => {
+        setIsHidden(true);
+      }, 300);
+      return () => clearTimeout(timeout);
     }
   }, [visible]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
-    transform: [
-      { translateY: translateY.value },
-      { scale: scale.value },
-    ],
+    transform: [{ translateY: translateY.value }, { scale: scale.value }],
     shadowOpacity: shadowOpacity.value,
   }));
 
@@ -70,7 +74,7 @@ const AnimatedAlert = ({ message, visible, onClose }) => {
     buttonScale.value = withTiming(1, { duration: 100 });
   };
 
-  if (!visible && opacity.value === 0) return null;
+  if (isHidden) return null;
 
   return (
     <AnimatedReanimated.View style={[styles.alertContainer, animatedStyle]}>
@@ -94,86 +98,139 @@ const PlayScreen = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [isVideoLoading, setIsVideoLoading] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [selectedQuality, setSelectedQuality] = useState(null);
+  const [videoData, setVideoData] = useState(null);
   const [showVideo, setShowVideo] = useState(false);
-  const [showDropdown, setShowDropdown] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [alertMessage, setAlertMessage] = useState('');
   const [showAlert, setShowAlert] = useState(false);
-  const [isInputInvalid, setIsInputInvalid] = useState(false); // New state for input highlight
-  const dropdownAnimation = useRef(new Animated.Value(0)).current;
+  const [isInputInvalid, setIsInputInvalid] = useState(false);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadSpeed, setDownloadSpeed] = useState(0);
+  const [downloadedBytes, setDownloadedBytes] = useState(0);
+  const [totalBytes, setTotalBytes] = useState(0);
+  const downloadJobId = useRef(null);
+  const lastUpdateTime = useRef(0);
+  const lastDownloadedBytes = useRef(0);
 
-  // Mock quality options (replace with backend data in production)
-  const qualityOptions = [
-    { quality: '360p', url: 'https://example.com/video_360p.mp4' },
-    { quality: '480p', url: 'https://example.com/video_480p.mp4' },
-    { quality: '720p', url: 'https://example.com/video_720p.mp4' },
-    { quality: '1080p', url: 'https://example.com/video_1080p.mp4' },
-  ];
-
-  // Toggle dropdown with animation
-  const toggleDropdown = () => {
-    if (showDropdown) {
-      Animated.timing(dropdownAnimation, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: true,
-      }).start(() => setShowDropdown(false));
-    } else {
-      setShowDropdown(true);
-      Animated.timing(dropdownAnimation, {
-        toValue: 1,
-        duration: 200,
-        useNativeDriver: true,
-      }).start();
+  // Process long or proxied URLs
+  const processLink = (link) => {
+    let processedLink = link.trim();
+    try {
+      // Check if the link contains a base64-encoded URL (e.g., ?url=<base64>)
+      const urlParams = new URLSearchParams(new URL(processedLink).search);
+      const encodedUrl = urlParams.get('url');
+      if (encodedUrl) {
+        // Decode base64
+        const decodedUrl = atob(encodedUrl);
+        // Validate it's a TeraBox link
+        if (decodedUrl.includes('terabox.com') || decodedUrl.includes('terashare')) {
+          // Extract the share ID (e.g., /s/<share_id>)
+          const match = decodedUrl.match(/\/s\/([^\?]+)/);
+          if (match && match[1]) {
+            return `https://1024terabox.com/s/${match[1]}`;
+          }
+          return decodedUrl;
+        }
+      }
+    } catch (e) {
+      console.warn('Link processing error:', e.message);
     }
-  };
-
-  // Handle quality selection
-  const handleQualitySelect = (url) => {
-    setIsVideoLoading(true);
-    setErrorMessage('');
-    setSelectedQuality(url);
-    setTimeout(() => {
-      setIsVideoLoading(false);
-    }, 1000); // Simulate video fetch delay
-    toggleDropdown();
+    // Return original link if processing fails
+    return processedLink;
   };
 
   // Validate TeraBox link
   const isValidTeraBoxLink = (link) => {
-    // Basic check for TeraBox or TeraShare links
     const lowerCaseLink = link.toLowerCase();
-    return lowerCaseLink.includes('terabox') || lowerCaseLink.includes('terashare');
+    return (
+      (lowerCaseLink.includes('terabox') || lowerCaseLink.includes('terashare')) &&
+      lowerCaseLink.includes('/s/')
+    );
   };
 
-  // Mock function to simulate link submission
-  const handleGetVideo = () => {
+  // Convert bytes to GB or MB
+  const bytesToGB = (bytes) => {
+    return (bytes / 1e9).toFixed(2);
+  };
+
+  const bytesToMB = (bytes) => {
+    return (bytes / 1e6).toFixed(2);
+  };
+
+  // Fetch video metadata from API
+  const fetchVideoMetadata = async (link) => {
+    try {
+      console.log('Sending metadata request with URL:', link);
+      const response = await fetch('https://fastapi-r708.onrender.com/file', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ url: link }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        throw new Error(`HTTP error! Status: ${response.status}, Details: ${errorData}`);
+      }
+
+      const data = await response.json();
+      console.log('File API Response:', data);
+
+      if (data && data.status === 'success' && Array.isArray(data.list) && data.list.length > 0) {
+        return {
+          title: data.list[0].name,
+          size: parseInt(data.list[0].size, 10),
+        };
+      } else {
+        const errorMsg = data.status !== 'success'
+          ? `API status: ${data.status}`
+          : !data.list
+            ? 'No list in response'
+            : 'Empty list in response';
+        throw new Error(`Invalid video data: ${errorMsg}`);
+      }
+    } catch (error) {
+      console.error('Fetch error:', error.message);
+      throw error;
+    }
+  };
+
+  // Handle link submission
+  const handleGetVideo = async () => {
     if (!inputLink) {
       setAlertMessage('Please enter a TeraBox link');
       setShowAlert(true);
-      setIsInputInvalid(true); // Highlight input
-      setInputLink(''); // Clear input
+      setIsInputInvalid(true);
+      setInputLink('');
       return;
     }
-    if (!isValidTeraBoxLink(inputLink)) {
-      setAlertMessage('Please enter a valid TeraBox link');
+    const processedLink = processLink(inputLink);
+    if (!isValidTeraBoxLink(processedLink)) {
+      setAlertMessage('Please enter a valid TeraBox link (e.g., https://1024terabox.com/s/...)');
       setShowAlert(true);
-      setIsInputInvalid(true); // Highlight input
-      setInputLink(''); // Clear input
+      setIsInputInvalid(true);
+      setInputLink('');
       return;
     }
-    setIsInputInvalid(false); // Clear highlight on valid link
+    setInputLink(processedLink);
+    setIsInputInvalid(false);
     Keyboard.dismiss();
     setIsLoading(true);
-    setIsVideoLoading(true);
     setErrorMessage('');
-    setTimeout(() => {
-      setShowVideo(true);
-      setSelectedQuality(qualityOptions[0].url);
+    try {
+      const metadata = await fetchVideoMetadata(processedLink);
+      setVideoData(metadata);
+      setVideoUrl('https://example.com/video.mp4');
       setIsLoading(false);
-      setIsVideoLoading(false);
-    }, 1000);
+    } catch (error) {
+      setAlertMessage(`Failed to fetch video data: ${error.message}`);
+      setShowAlert(true);
+      setIsLoading(false);
+    }
   };
 
   // Clear highlight when user starts typing
@@ -184,14 +241,134 @@ const PlayScreen = () => {
     }
   };
 
-  // Mock download toggle
-  const handleDownload = () => {
-    if (!selectedQuality) {
-      setErrorMessage('Please select a quality');
+  // Handle Play button
+  const handlePlay = () => {
+    if (!videoUrl) {
+      setErrorMessage('No video URL available');
       return;
     }
+    setIsVideoLoading(true);
+    setShowVideo(true);
+    setTimeout(() => {
+      setIsVideoLoading(false);
+    }, 1000);
+  };
+
+  // Handle Download button with retry logic
+  const handleDownload = async () => {
+    if (!inputLink) {
+      setErrorMessage('No link available for download');
+      return;
+    }
+    const processedLink = processLink(inputLink);
     setIsDownloading(true);
-    setTimeout(() => setIsDownloading(false), 2000);
+    try {
+      console.log('Sending download request with payload:', { url: processedLink });
+      const response = await fetch('https://fastapi-r708.onrender.com/link', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ url: processedLink }),
+      });
+
+      if (!response.ok) {
+        let errorDetails = 'Unknown error';
+        try {
+          errorDetails = await response.json();
+          console.log('Error response:', errorDetails);
+          errorDetails = JSON.stringify(errorDetails.detail || errorDetails);
+        } catch (e) {
+          errorDetails = await response.text();
+        }
+        throw new Error(`HTTP error! Status: ${response.status}, Details: ${errorDetails}`);
+      }
+
+      const data = await response.json();
+      console.log('Link API Response:', data);
+
+      if (data.download_link.url_2) {
+        const downloadUrl = data.download_link.url_2;
+        console.log(downloadUrl);
+        const fileName = videoData?.title.replace(/[^a-zA-Z0-9.-]/g, '_') || 'video.mp4';
+        const destinationPath = `${RNFS.TemporaryDirectoryPath}/${fileName}`;
+
+        setShowDownloadModal(true);
+        setDownloadProgress(0);
+        setDownloadedBytes(0);
+        setDownloadSpeed(0);
+        setTotalBytes(videoData?.size || 0);
+        lastUpdateTime.current = Date.now();
+        lastDownloadedBytes.current = 0;
+
+        const download = RNFS.downloadFile({
+          fromUrl: downloadUrl,
+          toFile: destinationPath,
+          background: true,
+          discretionary: true,
+          progress: (res) => {
+            const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+            const currentTime = Date.now();
+            const timeDiff = (currentTime - lastUpdateTime.current) / 1000;
+            const bytesDiff = res.bytesWritten - lastDownloadedBytes.current;
+            const speed = timeDiff > 0 ? (bytesDiff / timeDiff) / 1e3 : 0;
+
+            setDownloadProgress(progress);
+            setDownloadedBytes(res.bytesWritten);
+            setTotalBytes(res.contentLength || videoData?.size || 0);
+            setDownloadSpeed(speed);
+
+            if (timeDiff >= 1) {
+              lastUpdateTime.current = currentTime;
+              lastDownloadedBytes.current = res.bytesWritten;
+            }
+          },
+        });
+
+        downloadJobId.current = download.jobId;
+
+        download.promise
+          .then(() => {
+            setShowDownloadModal(false);
+            setAlertMessage(`Download completed: ${fileName}`);
+            setShowAlert(true);
+            setIsDownloading(false);
+            downloadJobId.current = null;
+          })
+          .catch((err) => {
+            console.error('Download failed:', err);
+            setShowDownloadModal(false);
+            setErrorMessage(`Download failed: ${err.message}`);
+            setShowAlert(true);
+            setIsDownloading(false);
+            downloadJobId.current = null;
+          });
+      } else {
+        throw new Error('No download URL returned');
+      }
+    } catch (error) {
+      console.error('Download error:', error.message);
+      setErrorMessage(`Failed to initiate download: ${error.message}`);
+      setShowAlert(true);
+      setIsDownloading(false);
+    }
+  };
+
+  // Cancel download
+  const cancelDownload = () => {
+    if (downloadJobId.current) {
+      RNFS.stopDownload(downloadJobId.current);
+    }
+    setShowDownloadModal(false);
+    setIsDownloading(false);
+    setDownloadProgress(0);
+    setDownloadedBytes(0);
+    setDownloadSpeed(0);
+    setTotalBytes(0);
+    downloadJobId.current = null;
+    setAlertMessage('Download cancelled');
+    setShowAlert(true);
   };
 
   // Handle video errors
@@ -203,25 +380,24 @@ const PlayScreen = () => {
 
   // Handle "Next" button press to reset the screen
   const handleNext = () => {
+    if (isDownloading) {
+      cancelDownload();
+    }
     setInputLink('');
     setShowVideo(false);
-    setSelectedQuality(null);
+    setVideoData(null);
+    setVideoUrl(null);
     setErrorMessage('');
     setIsLoading(false);
     setIsVideoLoading(false);
     setIsDownloading(false);
-    setShowDropdown(false);
-    setIsInputInvalid(false); // Clear highlight
-    dropdownAnimation.setValue(0);
+    setIsInputInvalid(false);
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <KeyboardAvoidingView
-        style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-      >
+      <StatusBar backgroundColor="#FFFFFF" barStyle="dark-content" />
+      <KeyboardAvoidingView style={styles.container} behavior="height" keyboardVerticalOffset={20}>
         <ScrollView contentContainerStyle={styles.scrollContent}>
           {/* Header */}
           <Text style={styles.header}>Video Player</Text>
@@ -237,15 +413,13 @@ const PlayScreen = () => {
               autoCapitalize="none"
               returnKeyType="done"
             />
-            {!showVideo ? (
+            {!videoData ? (
               <TouchableOpacity
                 style={[styles.submitButton, isLoading && styles.buttonDisabled]}
                 onPress={handleGetVideo}
                 disabled={isLoading}
               >
-                <Text style={styles.buttonText}>
-                  {isLoading ? 'Loading...' : 'Get Video'}
-                </Text>
+                <Text style={styles.buttonText}>{isLoading ? 'Loading...' : 'Get Video'}</Text>
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
@@ -254,63 +428,37 @@ const PlayScreen = () => {
             )}
           </View>
 
-          {/* Video Player and Quality Selector */}
+          {/* Video Metadata and Buttons */}
+          {videoData && !showVideo && (
+            <View style={styles.metadataContainer}>
+              <Text style={styles.metadataTitle}>{videoData.title}</Text>
+              <Text style={styles.metadataSize}>Size: {bytesToGB(videoData.size)} GB</Text>
+              <View style={styles.buttonContainer}>
+                <TouchableOpacity
+                  style={[styles.playButton, isVideoLoading && styles.buttonDisabled]}
+                  onPress={handlePlay}
+                  disabled={isVideoLoading}
+                >
+                  <Text style={styles.buttonText}>{isVideoLoading ? 'Loading...' : 'Play'}</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.downloadButton, isDownloading && styles.buttonDisabled]}
+                  onPress={handleDownload}
+                  disabled={isDownloading}
+                >
+                  <Text style={styles.buttonText}>{isDownloading ? 'Downloading...' : 'Download'}</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.errorText}>{errorMessage || ' '}</Text>
+            </View>
+          )}
+
+          {/* Video Player */}
           {showVideo && (
             <View style={styles.videoContainer}>
-              {/* Quality Selector with Error */}
-              <View style={styles.qualitySelector}>
-                <Text style={styles.qualityLabel}>Quality:</Text>
-                <View style={styles.dropdownContainer}>
-                  <TouchableOpacity
-                    style={styles.dropdownButton}
-                    onPress={toggleDropdown}
-                  >
-                    <Text style={styles.dropdownText}>
-                      {selectedQuality
-                        ? qualityOptions.find(
-                            (option) => option.url === selectedQuality,
-                          )?.quality || 'Select Quality'
-                        : 'Select Quality'}
-                    </Text>
-                  </TouchableOpacity>
-                  {showDropdown && (
-                    <Animated.View
-                      style={[
-                        styles.dropdownMenu,
-                        {
-                          opacity: dropdownAnimation,
-                          transform: [
-                            {
-                              translateY: dropdownAnimation.interpolate({
-                                inputRange: [0, 1],
-                                outputRange: [-10, 0],
-                              }),
-                            },
-                          ],
-                        },
-                      ]}
-                    >
-                      {qualityOptions.map((option, index) => (
-                        <TouchableOpacity
-                          key={index}
-                          style={styles.dropdownItem}
-                          onPress={() => handleQualitySelect(option.url)}
-                        >
-                          <Text style={styles.dropdownItemText}>
-                            {option.quality}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </Animated.View>
-                  )}
-                </View>
-                <Text style={styles.errorText}>{errorMessage || ' '}</Text>
-              </View>
-
-              {/* Video Player with Loading Overlay */}
               <View style={styles.videoWrapper}>
                 <Video
-                  source={{ uri: selectedQuality }}
+                  source={{ uri: videoUrl }}
                   style={styles.video}
                   controls={true}
                   resizeMode="contain"
@@ -328,36 +476,40 @@ const PlayScreen = () => {
                   </View>
                 )}
               </View>
-
-              {/* Download Button */}
-              <TouchableOpacity
-                style={[
-                  styles.downloadButton,
-                  isDownloading && styles.buttonDisabled,
-                ]}
-                onPress={handleDownload}
-                disabled={isDownloading}
-              >
-                <Text style={styles.buttonText}>
-                  {isDownloading ? 'Downloading...' : 'Download Video'}
-                </Text>
-              </TouchableOpacity>
             </View>
           )}
         </ScrollView>
 
-        <AnimatedAlert
-          message={alertMessage}
-          visible={showAlert}
-          onClose={() => setShowAlert(false)}
-        />
+        {/* Download Progress Modal */}
+        <Modal visible={showDownloadModal} transparent={true} animationType="fade" onRequestClose={cancelDownload}>
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContainer}>
+              <Text style={styles.modalTitle}>Downloading {videoData?.title || 'Video'}</Text>
+              <View style={styles.progressContainer}>
+                <ProgressBarAndroid
+                  styleAttr="Horizontal"
+                  indeterminate={false}
+                  progress={downloadProgress}
+                  color="#007AFF"
+                  style={styles.progressBar}
+                />
+                <Text style={styles.progressText}>{Math.round(downloadProgress * 100)}%</Text>
+              </View>
+              <Text style={styles.statusText}>
+                Downloaded: {bytesToMB(downloadedBytes)} MB / {bytesToMB(totalBytes)} MB
+              </Text>
+              <Text style={styles.statusText}>Speed: {downloadSpeed.toFixed(2)} KB/s</Text>
+              <TouchableOpacity style={styles.cancelButton} onPress={cancelDownload}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        <AnimatedAlert message={alertMessage} visible={showAlert} onClose={() => setShowAlert(false)} />
 
         {isLoading && (
-          <ActivityIndicator
-            size="large"
-            color="#FFFFFF"
-            style={styles.loadingIndicator}
-          />
+          <ActivityIndicator size="large" color="#FFFFFF" style={styles.loadingIndicator} />
         )}
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -403,7 +555,7 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   inputInvalid: {
-    borderColor: '#FF5252', // Red border for invalid input
+    borderColor: '#FF5252',
     borderWidth: 2,
   },
   submitButton: {
@@ -446,70 +598,70 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
   },
-  videoContainer: {
+  metadataContainer: {
     width: '100%',
+    backgroundColor: '#1E1E1E',
+    borderRadius: 12,
+    padding: 20,
     alignItems: 'center',
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  qualitySelector: {
+  metadataTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 10,
+  },
+  metadataSize: {
+    color: '#ccc',
+    fontSize: 16,
+    marginBottom: 20,
+  },
+  buttonContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
     width: '100%',
-    marginBottom: 15,
   },
-  qualityLabel: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '500',
+  playButton: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 15,
+    paddingHorizontal: 30,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#007AFF',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+    flex: 1,
     marginRight: 10,
   },
-  dropdownContainer: {
-    flex: 1,
-    position: 'relative',
-  },
-  dropdownButton: {
-    backgroundColor: '#1E1E1E',
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  dropdownText: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
-  },
-  dropdownMenu: {
-    position: 'absolute',
-    top: 50,
-    width: '100%',
-    backgroundColor: '#1E1E1E',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#333',
-    zIndex: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
+  downloadButton: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 15,
+    paddingHorizontal: 30,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#007AFF',
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
-    shadowRadius: 4,
+    shadowRadius: 8,
     elevation: 5,
-  },
-  dropdownItem: {
-    padding: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
-  },
-  dropdownItemText: {
-    color: '#fff',
-    fontSize: 16,
-    textAlign: 'center',
+    flex: 1,
+    marginLeft: 10,
   },
   errorText: {
     color: '#FF5252',
     fontSize: 14,
-    marginLeft: 10,
-    minWidth: 100,
-    textAlign: 'left',
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  videoContainer: {
+    width: '100%',
+    alignItems: 'center',
   },
   videoWrapper: {
     width: '100%',
@@ -531,19 +683,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  downloadButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 15,
-    paddingHorizontal: 30,
-    borderRadius: 12,
-    shadowColor: '#007AFF',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-    width: '100%',
-    alignItems: 'center',
-  },
   loadingIndicator: {
     position: 'absolute',
     top: '50%',
@@ -552,7 +691,7 @@ const styles = StyleSheet.create({
   },
   alertContainer: {
     position: 'absolute',
-    top: '35%',
+    top: '40%',
     left: 20,
     right: 20,
     backgroundColor: 'rgba(30, 30, 30, 0.92)',
@@ -599,6 +738,59 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     lineHeight: 22,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContainer: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 12,
+    padding: 20,
+    width: '80%',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 15,
+    textAlign: 'center',
+  },
+  progressContainer: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  progressBar: {
+    width: '100%',
+    height: 10,
+  },
+  progressText: {
+    color: '#fff',
+    fontSize: 16,
+    marginTop: 5,
+  },
+  statusText: {
+    color: '#ccc',
+    fontSize: 14,
+    marginBottom: 10,
+  },
+  cancelButton: {
+    backgroundColor: '#E53935',
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });
 

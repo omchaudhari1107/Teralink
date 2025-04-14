@@ -24,7 +24,7 @@ const App = () => {
         <Stack.Screen
           name="Play"
           component={PlayScreen}
-          options={{ title: 'TeraBox Video Player' }}
+            options={{ title: 'TeraLink' }}
         />
       </Stack.Navigator>
     </NavigationContainer>
