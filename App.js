@@ -13,18 +13,23 @@ const App = () => {
         initialRouteName="Play"
         screenOptions={{
           headerStyle: {
-            backgroundColor: '#000',
+            backgroundColor: '#121212',
+            // marginTop: 30,
           },
           headerTintColor: '#fff',
           headerTitleStyle: {
             fontWeight: 'bold',
+            fontSize: 25,
+            // marginTop: 10,
           },
+          // texrtAlign: 'center',
+          headerTitleAlign: 'center',
         }}
       >
         <Stack.Screen
           name="Play"
           component={PlayScreen}
-            options={{ title: 'TeraLink' }}
+            options={{ title: 'TeraLink Video Player' }}
         />
       </Stack.Navigator>
     </NavigationContainer>

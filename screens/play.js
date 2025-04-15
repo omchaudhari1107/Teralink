@@ -18,7 +18,6 @@ import {
 import Video from 'react-native-video';
 import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import RNFS from 'react-native-fs';
-import { retry } from 'async';
 
 // Animated Alert Component
 const AnimatedAlert = ({ message, visible, onClose }) => {
@@ -225,6 +224,7 @@ const PlayScreen = () => {
     try {
       const metadata = await fetchVideoMetadata(processedLink);
       setVideoData(metadata);
+      // Fetch download URL for streaming
       const response = await fetch('https://fastapi-r708.onrender.com/link', {
         method: 'POST',
         headers: {
@@ -238,8 +238,8 @@ const PlayScreen = () => {
       }
       const data = await response.json();
       if (data.download_link.url_2) {
-        setVideoUrl(data.download_link.url_2);
-        setIsMetadataLoaded(true);
+        setVideoUrl(data.download_link.url_2); // Store the direct download URL
+        setIsMetadataLoaded(true); // Only set to true after both metadata and URL are fetched
       } else {
         throw new Error('No download URL returned');
       }
@@ -254,7 +254,6 @@ const PlayScreen = () => {
   // Clean up temporary file
   const cleanupTempFile = async () => {
     if (streamingJobId.current) {
-      console.log('Stopping streaming job:', streamingJobId.current);
       isUserCancelled.current = true;
       RNFS.stopDownload(streamingJobId.current);
       streamingJobId.current = null;
@@ -281,8 +280,7 @@ const PlayScreen = () => {
       return;
     }
     if (isVideoLoading) {
-      console.log('Streaming already in progress');
-      return;
+      return; // Prevent multiple clicks
     }
 
     setIsVideoLoading(true);
@@ -293,83 +291,54 @@ const PlayScreen = () => {
     setTotalBytes(videoData?.size || 0);
 
     try {
+      // Generate a unique temporary file path
       const fileName = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`;
       tempFilePath.current = `${RNFS.TemporaryDirectoryPath}/${fileName}`;
-      console.log('Starting stream to:', tempFilePath.current);
 
+      // Verify URL accessibility
       const headResponse = await fetch(videoUrl, { method: 'HEAD' });
       if (!headResponse.ok) {
         throw new Error(`URL inaccessible: HTTP ${headResponse.status}`);
       }
 
-      const startDownload = () => {
-        return new Promise((resolve, reject) => {
-          const download = RNFS.downloadFile({
-            fromUrl: videoUrl,
-            toFile: tempFilePath.current,
-            background: false,
-            discretionary: false,
-            progressDivider: 5,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (compatible; VideoPlayer/1.0)',
-            },
-            progress: (res) => {
-              const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
-              setDownloadProgress(progress);
-              setDownloadedBytes(res.bytesWritten);
-              setTotalBytes(res.contentLength || videoData?.size || 0);
-              console.log('Streaming progress:', `${Math.round(progress * 100)}%`, `${res.bytesWritten}/${res.contentLength}`);
-
-              if (res.bytesWritten > Math.max(res.contentLength * 0.2, 50000000) && videoUrl !== `file://${tempFilePath.current}`) {
-                console.log('Buffering complete, verifying file before playback');
-                RNFS.exists(tempFilePath.current)
-                  .then((exists) => {
-                    if (exists) {
-                      setVideoUrl(`file://${tempFilePath.current}`);
-                      setIsVideoLoading(false);
-                    } else {
-                      console.warn('Temporary file inaccessible, falling back to progressive download');
-                      setVideoUrl(videoUrl);
-                      setIsVideoLoading(false);
-                    }
-                  })
-                  .catch((err) => {
-                    console.error('File verification error, falling back:', err);
-                    setVideoUrl(videoUrl);
-                    setIsVideoLoading(false);
-                  });
-              }
-            },
-          });
-
-          streamingJobId.current = download.jobId;
-          console.log('Streaming job started:', streamingJobId.current);
-          download.promise.then(resolve).catch(reject);
-        });
-      };
-
-      retry(
-        {
-          times: 3,
-          interval: 1000,
+      const download = RNFS.downloadFile({
+        fromUrl: videoUrl,
+        toFile: tempFilePath.current,
+        background: false,
+        discretionary: false,
+        progressDivider: 5,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; VideoPlayer/1.0)', // Mimic browser
         },
-        startDownload,
-        (err) => {
-          if (err) {
-            if (!isUserCancelled.current) {
-              console.error('Streaming download failed after retries:', err);
-              setErrorMessage(`Streaming failed: ${err.message}`);
-              setShowAlert(true);
-            }
+        progress: (res) => {
+          const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+          setDownloadProgress(progress);
+          setDownloadedBytes(res.bytesWritten);
+          setTotalBytes(res.contentLength || videoData?.size || 0);
+
+          if (res.bytesWritten > (res.contentLength * 0.1 || 10000000) && videoUrl !== `file://${tempFilePath.current}`) {
             setIsVideoLoading(false);
-            cleanupTempFile();
-            return;
           }
-          console.log('Streaming download completed');
+        },
+      });
+
+      streamingJobId.current = download.jobId;
+
+      download.promise
+        .then(() => {
           setIsVideoLoading(false);
           streamingJobId.current = null;
-        }
-      );
+        })
+        .catch((err) => {
+          if (!isUserCancelled.current) {
+            console.error('Streaming download error:', err);
+            setErrorMessage(`Streaming failed: ${err.message}`);
+            setShowAlert(true);
+          }
+          setIsVideoLoading(false);
+          cleanupTempFile();
+        });
+
     } catch (error) {
       console.error('Play error:', error.message);
       setErrorMessage(`Failed to start streaming: ${error.message}`);
@@ -517,7 +486,7 @@ const PlayScreen = () => {
 
   // Handle video errors
   const handleVideoError = (error) => {
-    console.log('Video error:', JSON.stringify(error));
+    console.log('Video error:', error);
     setErrorMessage('Failed to load video');
     setIsVideoLoading(false);
     cleanupTempFile();
@@ -529,7 +498,7 @@ const PlayScreen = () => {
       requestCancelDownload();
       return;
     }
-    setIsVideoLoading(false);
+    setIsVideoLoading(false); // Ensure streaming stops
     await cleanupTempFile();
     setInputLink('');
     setShowVideo(false);
@@ -555,7 +524,7 @@ const PlayScreen = () => {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar backgroundColor="#FFFFFF" barStyle="dark-content" />
+      <StatusBar backgroundColor="#007AFF" barStyle="dark-content" />
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -563,18 +532,19 @@ const PlayScreen = () => {
       >
         <ScrollView contentContainerStyle={styles.scrollContent}>
           {/* Header */}
-          <Text style={styles.header}>Video Player</Text>
+          {/* <Text style={styles.header}>Video Player</Text> */}
 
           {/* Input Section */}
           <View style={styles.inputContainer}>
             <TextInput
-              style={[styles.input, isInputInvalid && styles.inputInvalid]}
+              style={[styles.input, isInputInvalid && styles.inputInvalid, isMetadataLoaded && styles.inputDisabled]}
               placeholder="Paste TeraBox link here"
               placeholderTextColor="#888"
               value={inputLink}
               onChangeText={handleInputChange}
               autoCapitalize="none"
               returnKeyType="done"
+              editable={!isMetadataLoaded}
             />
             {!isMetadataLoaded ? (
               <TouchableOpacity
@@ -586,7 +556,7 @@ const PlayScreen = () => {
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-                <Text style={styles.nextButtonText}>Convert Next Video</Text>
+                <Text style={styles.nextButtonText}>Get New Video</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -595,8 +565,11 @@ const PlayScreen = () => {
           {isMetadataLoaded && videoData && !showVideo && (
             <View style={styles.metadataContainer}>
               <Text style={styles.metadataTitle}>{videoData.title}</Text>
-              <Text style={styles.metadataSize}>Size: {bytesToGB(videoData.size)} GB</Text>
-              <View style={styles.buttonContainer}>
+              <Text style={styles.metadataSize}>
+                Size: {videoData.size >= 1024 * 1024 * 1024
+                  ? `${(videoData.size / (1024 * 1024 * 1024)).toFixed(2)}GB`
+                  : `${(videoData.size / (1024 * 1024)).toFixed(2)}MB`}
+              </Text><View style={styles.buttonContainer}>
                 <TouchableOpacity
                   style={[styles.playButton, isVideoLoading && styles.buttonDisabled]}
                   onPress={handlePlay}
@@ -609,7 +582,13 @@ const PlayScreen = () => {
                   onPress={handleDownload}
                   disabled={isDownloading}
                 >
-                  <Text style={styles.buttonText}>{isDownloading ? 'Downloading...' : 'Download'}</Text>
+                  {isDownloading ? (
+                    <View style={styles.loaderContainer}>
+                      <ActivityIndicator size="small" color="#fff" />
+                    </View>
+                  ) : (
+                    <Text style={styles.buttonText}>Download</Text>
+                  )}
                 </TouchableOpacity>
               </View>
               <Text style={styles.errorText}>{errorMessage || ' '}</Text>
@@ -619,6 +598,14 @@ const PlayScreen = () => {
           {/* Video Player */}
           {showVideo && (
             <View style={styles.videoContainer}>
+              {isVideoLoading && (
+                <View style={styles.videoLoadingOverlay}>
+                  <ActivityIndicator size="large" color="#FFFFFF" />
+                  <Text style={styles.bufferText}>
+                    Buffering: {Math.round(downloadProgress * 100)}%
+                  </Text>
+                </View>
+              )}
               <View style={styles.videoWrapper}>
                 <Video
                   source={{ uri: videoUrl }}
@@ -626,10 +613,10 @@ const PlayScreen = () => {
                   controls={true}
                   resizeMode="contain"
                   bufferConfig={{
-                    minBufferMs: 30000,
-                    maxBufferMs: 60000,
-                    bufferForPlaybackMs: 5000,
-                    bufferForPlaybackAfterRebufferMs: 10000,
+                    minBufferMs: 15000,
+                    maxBufferMs: 50000,
+                    bufferForPlaybackMs: 2500,
+                    bufferForPlaybackAfterRebufferMs: 5000,
                   }}
                   onError={handleVideoError}
                   onBuffer={({ isBuffering }) => {
@@ -640,14 +627,6 @@ const PlayScreen = () => {
                     }
                   }}
                 />
-                {isVideoLoading && (
-                  <View style={styles.videoLoadingOverlay}>
-                    <ActivityIndicator size="large" color="#FFFFFF" />
-                    <Text style={styles.bufferText}>
-                      Buffering: {Math.round(downloadProgress * 100)}%
-                    </Text>
-                  </View>
-                )}
               </View>
             </View>
           )}
@@ -804,7 +783,7 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: '#1E1E1E',
     borderRadius: 12,
-    padding: 20,
+    padding: 15,
     alignItems: 'center',
     marginBottom: 20,
     borderWidth: 1,
@@ -867,7 +846,7 @@ const styles = StyleSheet.create({
   },
   videoWrapper: {
     width: '100%',
-    position: 'relative',
+    // position: 'relative',
     marginBottom: 20,
   },
   video: {
@@ -876,14 +855,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   videoLoadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    width: '100%',
+    // backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
+    borderRadius: 8,
+    marginBottom: 10,
   },
   bufferText: {
     color: '#FFFFFF',
