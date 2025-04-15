@@ -13,13 +13,14 @@ import {
   StatusBar,
   Modal,
   ProgressBarAndroid,
-  Clipboard, // NEW: Added Clipboard for paste functionality
+  Platform,
+  AppState,
 } from 'react-native';
 import Video from 'react-native-video';
 import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import RNFS from 'react-native-fs';
-
-// AnimatedAlert Component (unchanged)
+import axios from 'axios';
+// Animated Alert Component
 const AnimatedAlert = ({ message, visible, onClose }) => {
   const opacity = useSharedValue(0);
   const translateY = useSharedValue(50);
@@ -112,18 +113,17 @@ const PlayScreen = () => {
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [totalBytes, setTotalBytes] = useState(0);
+  const [isMetadataLoaded, setIsMetadataLoaded] = useState(false);
   const downloadJobId = useRef(null);
+  const streamingJobId = useRef(null);
+  const tempFilePath = useRef(null);
   const lastUpdateTime = useRef(0);
   const lastDownloadedBytes = useRef(0);
   const isUserCancelled = useRef(false);
-  const retryCount = useRef(0); // NEW: Track retry attempts
+  const appState = useRef(AppState.currentState);
+  const isThrottled = useRef(false);
 
-  // NEW: Convert bytes to Mbps
-  const bytesToMbps = (bytes) => {
-    return (((bytes * 8) / 1e6)).toFixed(2);
-  };
-
-  // Process long or proxied URLs (unchanged)
+  // Process long or proxied URLs
   const processLink = (link) => {
     let processedLink = link.trim();
     try {
@@ -145,7 +145,7 @@ const PlayScreen = () => {
     return processedLink;
   };
 
-  // Validate TeraBox link (unchanged)
+  // Validate TeraBox link
   const isValidTeraBoxLink = (link) => {
     const lowerCaseLink = link.toLowerCase();
     return (
@@ -154,7 +154,7 @@ const PlayScreen = () => {
     );
   };
 
-  // Convert bytes to GB or MB (unchanged)
+  // Convert bytes to GB or MB
   const bytesToGB = (bytes) => {
     return (bytes / 1e9).toFixed(2);
   };
@@ -163,10 +163,9 @@ const PlayScreen = () => {
     return (bytes / 1e6).toFixed(2);
   };
 
-  // Fetch video metadata from API (unchanged)
+  // Fetch video metadata from API
   const fetchVideoMetadata = async (link) => {
     try {
-      console.log('Sending metadata request with URL:', link);
       const response = await fetch('https://fastapi-r708.onrender.com/file', {
         method: 'POST',
         headers: {
@@ -182,7 +181,6 @@ const PlayScreen = () => {
       }
 
       const data = await response.json();
-      console.log('File API Response:', data);
 
       if (data && data.status === 'success' && Array.isArray(data.list) && data.list.length > 0) {
         return {
@@ -203,7 +201,7 @@ const PlayScreen = () => {
     }
   };
 
-  // Handle link submission (unchanged)
+  // Handle link submission
   const handleGetVideo = async () => {
     if (!inputLink) {
       setAlertMessage('Please enter a TeraBox link');
@@ -225,10 +223,28 @@ const PlayScreen = () => {
     Keyboard.dismiss();
     setIsLoading(true);
     setErrorMessage('');
+    setIsMetadataLoaded(false);
     try {
       const metadata = await fetchVideoMetadata(processedLink);
       setVideoData(metadata);
-      setVideoUrl('https://example.com/video.mp4');
+      const response = await fetch('https://fastapi-r708.onrender.com/link', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify({ url: processedLink }),
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error! Status: ${response.status}`);
+      }
+      const data = await response.json();
+      if (data.download_link.url_2) {
+        setVideoUrl(data.download_link.url_2);
+        setIsMetadataLoaded(true);
+      } else {
+        throw new Error('No download URL returned');
+      }
       setIsLoading(false);
     } catch (error) {
       setAlertMessage(`Failed to fetch video data: ${error.message}`);
@@ -237,7 +253,102 @@ const PlayScreen = () => {
     }
   };
 
-  // Clear highlight when user starts typing (unchanged)
+  // Clean up temporary file
+  const cleanupTempFile = async () => {
+    if (streamingJobId.current) {
+      isUserCancelled.current = true;
+      RNFS.stopDownload(streamingJobId.current);
+      streamingJobId.current = null;
+    }
+    if (tempFilePath.current) {
+      try {
+        const exists = await RNFS.exists(tempFilePath.current);
+        if (exists) {
+          await RNFS.unlink(tempFilePath.current);
+          console.log('Temporary file deleted:', tempFilePath.current);
+        }
+      } catch (error) {
+        console.warn('Failed to delete temporary file:', error.message);
+      }
+      tempFilePath.current = null;
+    }
+  };
+
+  // Handle Play button with streaming
+  const handlePlay = async () => {
+    if (!videoUrl) {
+      setErrorMessage('No video URL available');
+      setShowAlert(true);
+      return;
+    }
+    if (isVideoLoading) {
+      return;
+    }
+
+    setIsVideoLoading(true);
+    setShowVideo(true);
+    setErrorMessage('');
+    setDownloadProgress(0);
+    setDownloadedBytes(0);
+    setTotalBytes(videoData?.size || 0);
+
+    try {
+      const fileName = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`;
+      tempFilePath.current = `${RNFS.TemporaryDirectoryPath}/${fileName}`;
+
+      const headResponse = await fetch(videoUrl, { method: 'HEAD' });
+      if (!headResponse.ok) {
+        throw new Error(`URL inaccessible: HTTP ${headResponse.status}`);
+      }
+
+      const download = RNFS.downloadFile({
+        fromUrl: videoUrl,
+        toFile: tempFilePath.current,
+        background: false,
+        discretionary: false,
+        progressDivider: 5,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; VideoPlayer/1.0)',
+        },
+        progress: (res) => {
+          const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+          setDownloadProgress(progress);
+          setDownloadedBytes(res.bytesWritten);
+          setTotalBytes(res.contentLength || videoData?.size || 0);
+
+          if (res.bytesWritten > (res.contentLength * 0.1 || 10000000) && videoUrl !== `file://${tempFilePath.current}`) {
+            setIsVideoLoading(false);
+          }
+        },
+      });
+
+      streamingJobId.current = download.jobId;
+
+      download.promise
+        .then(() => {
+          setIsVideoLoading(false);
+          streamingJobId.current = null;
+        })
+        .catch((err) => {
+          if (!isUserCancelled.current) {
+            console.error('Streaming download error:', err);
+            setErrorMessage(`Streaming failed: ${err.message}`);
+            setShowAlert(true);
+          }
+          setIsVideoLoading(false);
+          cleanupTempFile();
+        });
+
+    } catch (error) {
+      console.error('Play error:', error.message);
+      setErrorMessage(`Failed to start streaming: ${error.message}`);
+      setShowAlert(true);
+      setIsVideoLoading(false);
+      cleanupTempFile();
+    }
+  };
+
+  // Clear highlight when user starts typing
   const handleInputChange = (text) => {
     setInputLink(text);
     if (isInputInvalid) {
@@ -245,39 +356,8 @@ const PlayScreen = () => {
     }
   };
 
-  // NEW: Handle paste from clipboard
-  const handlePaste = async () => {
-    try {
-      const clipboardContent = await Clipboard.getString();
-      if (clipboardContent) {
-        setInputLink(clipboardContent);
-        setIsInputInvalid(false);
-      } else {
-        setAlertMessage('Clipboard is empty');
-        setShowAlert(true);
-      }
-    } catch (error) {
-      console.error('Paste error:', error);
-      setAlertMessage('Failed to paste from clipboard');
-      setShowAlert(true);
-    }
-  };
-
-  // Handle Play button (unchanged)
-  const handlePlay = () => {
-    if (!videoUrl) {
-      setErrorMessage('No video URL available');
-      return;
-    }
-    setIsVideoLoading(true);
-    setShowVideo(true);
-    setTimeout(() => {
-      setIsVideoLoading(false);
-    }, 1000);
-  };
-
-  // Handle Download button with retry logic
-  const handleDownload = async (retries = 2) => {
+  // Handle Download button with speed limiter
+  const handleDownload = async () => {
     if (!inputLink) {
       setErrorMessage('No link available for download');
       return;
@@ -285,7 +365,6 @@ const PlayScreen = () => {
     const processedLink = processLink(inputLink);
     setIsDownloading(true);
     try {
-      console.log('Sending download request with payload:', { url: processedLink });
       const response = await fetch('https://fastapi-r708.onrender.com/link', {
         method: 'POST',
         headers: {
@@ -299,7 +378,6 @@ const PlayScreen = () => {
         let errorDetails = 'Unknown error';
         try {
           errorDetails = await response.json();
-          console.log('Error response:', errorDetails);
           errorDetails = JSON.stringify(errorDetails.detail || errorDetails);
         } catch (e) {
           errorDetails = await response.text();
@@ -308,13 +386,11 @@ const PlayScreen = () => {
       }
 
       const data = await response.json();
-      console.log('Link API Response:', data);
 
       if (data.download_link.url_2) {
         const downloadUrl = data.download_link.url_2;
-        console.log(downloadUrl);
         const fileName = videoData?.title.replace(/[^a-zA-Z0-9.-]/g, '_') || 'video.mp4';
-        const destinationPath = `${RNFS.TemporaryDirectoryPath}/${fileName}`;
+        const destinationPath = `${RNFS.DownloadDirectoryPath}/${fileName}`;
 
         setShowDownloadModal(true);
         setDownloadProgress(0);
@@ -324,31 +400,46 @@ const PlayScreen = () => {
         lastUpdateTime.current = Date.now();
         lastDownloadedBytes.current = 0;
         isUserCancelled.current = false;
-        retryCount.current = 0; // Reset retry count
+
+        // Speed limiter variables
+        const maxSpeedBytesPerSecond = 200 * 1024; // 200 KB/s in bytes
+        let accumulatedBytes = 0;
+        let lastThrottleTime = Date.now();
 
         const download = RNFS.downloadFile({
           fromUrl: downloadUrl,
           toFile: destinationPath,
           background: true,
-          cacheable: true, // NEW: Enable caching
-          connectionTimeout: 15000, // NEW: Set connection timeout
-          readTimeout: 15000, // NEW: Set read timeout
-          progressDivider: 10, // NEW: Update progress every 10%
-          progress: (res) => {
-            const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+          discretionary: true,
+          progressDivider: 1,
+          progress: async (res) => {
             const currentTime = Date.now();
             const timeDiff = (currentTime - lastUpdateTime.current) / 1000;
             const bytesDiff = res.bytesWritten - lastDownloadedBytes.current;
-            const speed = timeDiff > 0 ? bytesDiff / timeDiff : 0;
+            let speed = timeDiff > 0 ? (bytesDiff / 1e6) / timeDiff : 0;
 
-            setDownloadProgress(progress);
+            setDownloadProgress(res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0);
             setDownloadedBytes(res.bytesWritten);
             setTotalBytes(res.contentLength || videoData?.size || 0);
             setDownloadSpeed(speed);
 
-            if (timeDiff >= 1) {
-              lastUpdateTime.current = currentTime;
-              lastDownloadedBytes.current = res.bytesWritten;
+            lastUpdateTime.current = currentTime;
+            lastDownloadedBytes.current = res.bytesWritten;
+
+            // Apply throttling if in background
+            if (isThrottled.current) {
+              accumulatedBytes += bytesDiff;
+              const elapsedTime = (currentTime - lastThrottleTime) / 1000;
+              const allowedBytes = maxSpeedBytesPerSecond * elapsedTime;
+
+              if (accumulatedBytes > allowedBytes) {
+                const sleepTime = (accumulatedBytes / maxSpeedBytesPerSecond) * 1000;
+                RNFS.pauseDownload(download.jobId);
+                await new Promise((resolve) => setTimeout(resolve, sleepTime));
+                RNFS.resumeDownload(download.jobId);
+                accumulatedBytes = 0;
+                lastThrottleTime = Date.now();
+              }
             }
           },
         });
@@ -358,27 +449,22 @@ const PlayScreen = () => {
         download.promise
           .then(() => {
             setShowDownloadModal(false);
-            setAlertMessage(`Download completed: ${fileName}`);
+            setAlertMessage(`Download completed: ${fileName} saved to Downloads`);
             setShowAlert(true);
             setIsDownloading(false);
+            setDownloadSpeed(0);
             downloadJobId.current = null;
           })
-          .catch(async (err) => {
+          .catch((err) => {
             console.error('Download failed:', err);
-            if (!isUserCancelled.current && retries > 0) {
-              console.log(`Retrying download... (${retries} retries left)`);
-              retryCount.current += 1;
-              await new Promise((resolve) => setTimeout(resolve, 2000)); // 2-second delay
-              handleDownload(retries - 1); // Retry
-            } else {
-              if (!isUserCancelled.current) {
-                setShowDownloadModal(false);
-                setErrorMessage(`Download failed: ${err.message}`);
-                setShowAlert(true);
-              }
-              setIsDownloading(false);
-              downloadJobId.current = null;
+            if (!isUserCancelled.current) {
+              setShowDownloadModal(false);
+              setErrorMessage(`Download failed: ${err.message}`);
+              setShowAlert(true);
             }
+            setIsDownloading(false);
+            setDownloadSpeed(0);
+            downloadJobId.current = null;
           });
       } else {
         throw new Error('No download URL returned');
@@ -388,15 +474,16 @@ const PlayScreen = () => {
       setErrorMessage(`Failed to initiate download: ${error.message}`);
       setShowAlert(true);
       setIsDownloading(false);
+      setDownloadSpeed(0);
     }
   };
 
-  // Show cancel confirmation modal (unchanged)
+  // Show cancel confirmation modal
   const requestCancelDownload = () => {
     setShowCancelConfirmModal(true);
   };
 
-  // Confirm and cancel download (unchanged)
+  // Confirm and cancel download
   const confirmCancelDownload = () => {
     if (downloadJobId.current) {
       isUserCancelled.current = true;
@@ -410,63 +497,178 @@ const PlayScreen = () => {
     setDownloadSpeed(0);
     setTotalBytes(0);
     downloadJobId.current = null;
-    setErrorMessage('');
   };
 
-  // Dismiss cancel confirmation (unchanged)
+  // Dismiss cancel confirmation
   const dismissCancelConfirm = () => {
     setShowCancelConfirmModal(false);
   };
 
-  // Handle video errors (unchanged)
+  // Handle video errors
   const handleVideoError = (error) => {
     console.log('Video error:', error);
     setErrorMessage('Failed to load video');
     setIsVideoLoading(false);
+    cleanupTempFile();
   };
 
-  // Handle "Next" button press to reset the screen (unchanged)
-  const handleNext = () => {
+  // Handle "Next" button press
+  const handleNext = async () => {
     if (isDownloading) {
       requestCancelDownload();
       return;
     }
+    setIsVideoLoading(false);
+    await cleanupTempFile();
     setInputLink('');
     setShowVideo(false);
     setVideoData(null);
     setVideoUrl(null);
     setErrorMessage('');
     setIsLoading(false);
-    setIsVideoLoading(false);
     setIsDownloading(false);
     setIsInputInvalid(false);
+    setDownloadSpeed(0);
+    setDownloadProgress(0);
+    setDownloadedBytes(0);
+    setTotalBytes(0);
+    setIsMetadataLoaded(false);
   };
+
+  // Handle app state changes
+  useEffect(() => {
+    const handleAppStateChange = (nextAppState) => {
+      if (appState.current === 'active' && nextAppState === 'background') {
+        // App is going to background (e.g., in recent apps)
+        if (downloadJobId.current) {
+          RNFS.stopDownload(downloadJobId.current);
+          console.log('Download stopped due to app going to background');
+          isThrottled.current = true; // Enable throttling flag
+        }
+      } else if (appState.current === 'background' && nextAppState === 'active') {
+        // App is returning to foreground
+        if (downloadJobId.current && videoUrl && videoData) {
+          // Restart download from the last known position
+          const fileName = videoData.title
+            ? videoData.title.replace(/[^a-zA-Z0-9.-]/g, '_')
+            : 'video.mp4';
+          const destinationPath = `${RNFS.DownloadDirectoryPath}/${fileName}`;
+  
+          const download = RNFS.downloadFile({
+            fromUrl: videoUrl,
+            toFile: destinationPath,
+            background: true,
+            discretionary: true,
+            progressDivider: 1,
+            begin: (res) => {
+              // Optionally handle begin event if needed
+            },
+            progress: async (res) => {
+              const currentTime = Date.now();
+              const timeDiff = (currentTime - lastUpdateTime.current) / 1000;
+              const bytesDiff = res.bytesWritten - lastDownloadedBytes.current;
+              let speed = timeDiff > 0 ? (bytesDiff / 1e6) / timeDiff : 0;
+  
+              setDownloadProgress(res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0);
+              setDownloadedBytes(res.bytesWritten);
+              setTotalBytes(res.contentLength || videoData?.size || 0);
+              setDownloadSpeed(speed);
+  
+              lastUpdateTime.current = currentTime;
+              lastDownloadedBytes.current = res.bytesWritten;
+  
+              if (isThrottled.current) {
+                accumulatedBytes += bytesDiff;
+                const elapsedTime = (currentTime - lastThrottleTime) / 1000;
+                const allowedBytes = maxSpeedBytesPerSecond * elapsedTime;
+  
+                if (accumulatedBytes > allowedBytes) {
+                  const sleepTime = (accumulatedBytes / maxSpeedBytesPerSecond) * 1000;
+                  RNFS.stopDownload(download.jobId);
+                  await new Promise((resolve) => setTimeout(resolve, sleepTime));
+                  // Restart download
+                  const newDownload = RNFS.downloadFile({
+                    fromUrl: videoUrl,
+                    toFile: destinationPath,
+                    background: true,
+                    discretionary: true,
+                    progressDivider: 1,
+                  });
+                  downloadJobId.current = newDownload.jobId;
+                  accumulatedBytes = 0;
+                  lastThrottleTime = Date.now();
+                }
+              }
+            },
+          });
+  
+          downloadJobId.current = download.jobId;
+  
+          download.promise
+            .then(() => {
+              setShowDownloadModal(false);
+              setAlertMessage(`Download completed: ${fileName} saved to Downloads`);
+              setShowAlert(true);
+              setIsDownloading(false);
+              setDownloadSpeed(0);
+              downloadJobId.current = null;
+            })
+            .catch((err) => {
+              if (!isUserCancelled.current) {
+                setShowDownloadModal(false);
+                setErrorMessage(`Download failed: ${err.message}`);
+                setShowAlert(true);
+              }
+              setIsDownloading(false);
+              setDownloadSpeed(0);
+              downloadJobId.current = null;
+            });
+  
+          console.log('Download restarted as app returned to foreground');
+        }
+      }
+      appState.current = nextAppState;
+    };
+  
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+  
+    return () => {
+      subscription.remove();
+    };
+  }, [videoUrl, videoData]); // Add dependencies to ensure correct data access
+
+  // Clean up on component unmount
+  useEffect(() => {
+    return () => {
+      cleanupTempFile();
+    };
+  }, []);
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar backgroundColor="#FFFFFF" barStyle="dark-content" />
-      <KeyboardAvoidingView style={styles.container} behavior="height" keyboardVerticalOffset={20}>
+      <StatusBar backgroundColor="#007AFF" barStyle="dark-content" />
+      <KeyboardAvoidingView
+        style={styles.container}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={20}
+      >
         <ScrollView contentContainerStyle={styles.scrollContent}>
           {/* Header */}
-          <Text style={styles.header}>Video Player</Text>
+          {/* <Text style={styles.header}>Video Player</Text> */}
 
           {/* Input Section */}
           <View style={styles.inputContainer}>
-            <View style={styles.inputWrapper}>
-              <TextInput
-                style={[styles.input, isInputInvalid && styles.inputInvalid]}
-                placeholder="Paste TeraBox link here"
-                placeholderTextColor="#888"
-                value={inputLink}
-                onChangeText={handleInputChange}
-                autoCapitalize="none"
-                returnKeyType="done"
-              />
-              <TouchableOpacity style={styles.pasteButton} onPress={handlePaste}>
-                <Text style={styles.pasteButtonText}>Paste</Text>
-              </TouchableOpacity>
-            </View>
-            {!videoData ? (
+            <TextInput
+              style={[styles.input, isInputInvalid && styles.inputInvalid, isMetadataLoaded && styles.inputDisabled]}
+              placeholder="Paste TeraBox link here"
+              placeholderTextColor="#888"
+              value={inputLink}
+              onChangeText={handleInputChange}
+              autoCapitalize="none"
+              returnKeyType="done"
+              editable={!isMetadataLoaded}
+            />
+            {!isMetadataLoaded ? (
               <TouchableOpacity
                 style={[styles.submitButton, isLoading && styles.buttonDisabled]}
                 onPress={handleGetVideo}
@@ -476,16 +678,20 @@ const PlayScreen = () => {
               </TouchableOpacity>
             ) : (
               <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
-                <Text style={styles.nextButtonText}>Convert Next Video</Text>
+                <Text style={styles.nextButtonText}>Get New Video</Text>
               </TouchableOpacity>
             )}
           </View>
 
           {/* Video Metadata and Buttons */}
-          {videoData && !showVideo && (
+          {isMetadataLoaded && videoData && !showVideo && (
             <View style={styles.metadataContainer}>
               <Text style={styles.metadataTitle}>{videoData.title}</Text>
-              <Text style={styles.metadataSize}>Size: {bytesToGB(videoData.size)} GB</Text>
+              <Text style={styles.metadataSize}>
+                Size: {videoData.size >= 1024 * 1024 * 1024
+                  ? `${(videoData.size / (1024 * 1024 * 1024)).toFixed(2)}GB`
+                  : `${(videoData.size / (1024 * 1024)).toFixed(2)}MB`}
+              </Text>
               <View style={styles.buttonContainer}>
                 <TouchableOpacity
                   style={[styles.playButton, isVideoLoading && styles.buttonDisabled]}
@@ -496,10 +702,16 @@ const PlayScreen = () => {
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.downloadButton, isDownloading && styles.buttonDisabled]}
-                  onPress={() => handleDownload(2)} // Start with 2 retries
+                  onPress={handleDownload}
                   disabled={isDownloading}
                 >
-                  <Text style={styles.buttonText}>{isDownloading ? 'Downloading...' : 'Download'}</Text>
+                  {isDownloading ? (
+                    <View style={styles.loaderContainer}>
+                      <ActivityIndicator size="small" color="#fff" />
+                    </View>
+                  ) : (
+                    <Text style={styles.buttonText}>Download</Text>
+                  )}
                 </TouchableOpacity>
               </View>
               <Text style={styles.errorText}>{errorMessage || ' '}</Text>
@@ -509,6 +721,14 @@ const PlayScreen = () => {
           {/* Video Player */}
           {showVideo && (
             <View style={styles.videoContainer}>
+              {isVideoLoading && (
+                <View style={styles.videoLoadingOverlay}>
+                  <ActivityIndicator size="large" color="#FFFFFF" />
+                  <Text style={styles.bufferText}>
+                    Buffering: {Math.round(downloadProgress * 100)}%
+                  </Text>
+                </View>
+              )}
               <View style={styles.videoWrapper}>
                 <Video
                   source={{ uri: videoUrl }}
@@ -522,19 +742,26 @@ const PlayScreen = () => {
                     bufferForPlaybackAfterRebufferMs: 5000,
                   }}
                   onError={handleVideoError}
+                  onBuffer={({ isBuffering }) => {
+                    if (isBuffering) {
+                      setIsVideoLoading(true);
+                    } else if (!isVideoLoading) {
+                      setIsVideoLoading(false);
+                    }
+                  }}
                 />
-                {isVideoLoading && (
-                  <View style={styles.videoLoadingOverlay}>
-                    <ActivityIndicator size="large" color="#FFFFFF" />
-                  </View>
-                )}
               </View>
             </View>
           )}
         </ScrollView>
 
         {/* Download Progress Modal */}
-        <Modal visible={showDownloadModal} transparent={true} animationType="fade" onRequestClose={requestCancelDownload}>
+        <Modal
+          visible={showDownloadModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={requestCancelDownload}
+        >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
               <Text style={styles.modalTitle}>Downloading {videoData?.title || 'Video'}</Text>
@@ -551,7 +778,9 @@ const PlayScreen = () => {
               <Text style={styles.statusText}>
                 Downloaded: {bytesToMB(downloadedBytes)} MB / {bytesToMB(totalBytes)} MB
               </Text>
-              <Text style={styles.statusText}>Speed: {bytesToMbps(downloadSpeed)} Mbps</Text>
+              <Text style={styles.statusText}>
+                Speed: {downloadSpeed < 1 ? (downloadSpeed * 1000).toFixed(2) + ' KB/s' : downloadSpeed.toFixed(2) + ' MB/s'}
+              </Text>
               <TouchableOpacity style={styles.cancelButton} onPress={requestCancelDownload}>
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
@@ -560,7 +789,12 @@ const PlayScreen = () => {
         </Modal>
 
         {/* Cancel Confirmation Modal */}
-        <Modal visible={showCancelConfirmModal} transparent={true} animationType="fade" onRequestClose={dismissCancelConfirm}>
+        <Modal
+          visible={showCancelConfirmModal}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={dismissCancelConfirm}
+        >
           <View style={styles.modalOverlay}>
             <View style={styles.modalContainer}>
               <Text style={styles.modalTitle}>Are you sure you want to stop downloading?</Text>
@@ -613,12 +847,6 @@ const styles = StyleSheet.create({
     marginBottom: 30,
     alignItems: 'center',
   },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    width: '100%',
-    marginBottom: 15,
-  },
   input: {
     backgroundColor: '#1E1E1E',
     color: '#fff',
@@ -627,25 +855,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     borderWidth: 1,
     borderColor: '#333',
-    flex: 1,
-    marginRight: 10,
+    width: '100%',
+    marginBottom: 15,
   },
   inputInvalid: {
     borderColor: '#FF5252',
     borderWidth: 2,
-  },
-  pasteButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 15,
-    paddingHorizontal: 20,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  pasteButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
   },
   submitButton: {
     backgroundColor: '#007AFF',
@@ -691,7 +906,7 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: '#1E1E1E',
     borderRadius: 12,
-    padding: 20,
+    padding: 15,
     alignItems: 'center',
     marginBottom: 20,
     borderWidth: 1,
@@ -754,7 +969,6 @@ const styles = StyleSheet.create({
   },
   videoWrapper: {
     width: '100%',
-    position: 'relative',
     marginBottom: 20,
   },
   video: {
@@ -763,14 +977,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#000',
   },
   videoLoadingOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    width: '100%',
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 20,
+    borderRadius: 8,
+    marginBottom: 10,
+  },
+  bufferText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    marginTop: 10,
+    textAlign: 'center',
   },
   loadingIndicator: {
     position: 'absolute',
