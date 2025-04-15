@@ -18,6 +18,7 @@ import {
 import Video from 'react-native-video';
 import AnimatedReanimated, { Easing, useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated';
 import RNFS from 'react-native-fs';
+import { retry } from 'async';
 
 // Animated Alert Component
 const AnimatedAlert = ({ message, visible, onClose }) => {
@@ -112,6 +113,7 @@ const PlayScreen = () => {
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [totalBytes, setTotalBytes] = useState(0);
+  const [isMetadataLoaded, setIsMetadataLoaded] = useState(false);
   const downloadJobId = useRef(null);
   const streamingJobId = useRef(null);
   const tempFilePath = useRef(null);
@@ -219,10 +221,10 @@ const PlayScreen = () => {
     Keyboard.dismiss();
     setIsLoading(true);
     setErrorMessage('');
+    setIsMetadataLoaded(false);
     try {
       const metadata = await fetchVideoMetadata(processedLink);
       setVideoData(metadata);
-      // Fetch download URL for streaming
       const response = await fetch('https://fastapi-r708.onrender.com/link', {
         method: 'POST',
         headers: {
@@ -236,7 +238,8 @@ const PlayScreen = () => {
       }
       const data = await response.json();
       if (data.download_link.url_2) {
-        setVideoUrl(data.download_link.url_2); // Store the direct download URL
+        setVideoUrl(data.download_link.url_2);
+        setIsMetadataLoaded(true);
       } else {
         throw new Error('No download URL returned');
       }
@@ -279,73 +282,94 @@ const PlayScreen = () => {
     }
     if (isVideoLoading) {
       console.log('Streaming already in progress');
-      return; // Prevent multiple clicks
+      return;
     }
-  
+
     setIsVideoLoading(true);
     setShowVideo(true);
     setErrorMessage('');
     setDownloadProgress(0);
     setDownloadedBytes(0);
     setTotalBytes(videoData?.size || 0);
-  
+
     try {
-      // Generate a unique temporary file path
       const fileName = `temp_video_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`;
       tempFilePath.current = `${RNFS.TemporaryDirectoryPath}/${fileName}`;
       console.log('Starting stream to:', tempFilePath.current);
-  
-      // Verify URL accessibility
+
       const headResponse = await fetch(videoUrl, { method: 'HEAD' });
       if (!headResponse.ok) {
         throw new Error(`URL inaccessible: HTTP ${headResponse.status}`);
       }
-  
-      // Start downloading to temporary file
-      const download = RNFS.downloadFile({
-        fromUrl: videoUrl,
-        toFile: tempFilePath.current,
-        background: false, // Disable background to prevent aborts
-        discretionary: false,
-        progressDivider: 5, // Reduce callback frequency
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; VideoPlayer/1.0)', // Mimic browser
+
+      const startDownload = () => {
+        return new Promise((resolve, reject) => {
+          const download = RNFS.downloadFile({
+            fromUrl: videoUrl,
+            toFile: tempFilePath.current,
+            background: false,
+            discretionary: false,
+            progressDivider: 5,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; VideoPlayer/1.0)',
+            },
+            progress: (res) => {
+              const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
+              setDownloadProgress(progress);
+              setDownloadedBytes(res.bytesWritten);
+              setTotalBytes(res.contentLength || videoData?.size || 0);
+              console.log('Streaming progress:', `${Math.round(progress * 100)}%`, `${res.bytesWritten}/${res.contentLength}`);
+
+              if (res.bytesWritten > Math.max(res.contentLength * 0.2, 50000000) && videoUrl !== `file://${tempFilePath.current}`) {
+                console.log('Buffering complete, verifying file before playback');
+                RNFS.exists(tempFilePath.current)
+                  .then((exists) => {
+                    if (exists) {
+                      setVideoUrl(`file://${tempFilePath.current}`);
+                      setIsVideoLoading(false);
+                    } else {
+                      console.warn('Temporary file inaccessible, falling back to progressive download');
+                      setVideoUrl(videoUrl);
+                      setIsVideoLoading(false);
+                    }
+                  })
+                  .catch((err) => {
+                    console.error('File verification error, falling back:', err);
+                    setVideoUrl(videoUrl);
+                    setIsVideoLoading(false);
+                  });
+              }
+            },
+          });
+
+          streamingJobId.current = download.jobId;
+          console.log('Streaming job started:', streamingJobId.current);
+          download.promise.then(resolve).catch(reject);
+        });
+      };
+
+      retry(
+        {
+          times: 3,
+          interval: 1000,
         },
-        progress: (res) => {
-          const progress = res.contentLength > 0 ? res.bytesWritten / res.contentLength : 0;
-          setDownloadProgress(progress);
-          setDownloadedBytes(res.bytesWritten);
-          setTotalBytes(res.contentLength || videoData?.size || 0);
-          console.log('Streaming progress:', `${Math.round(progress * 100)}%`, `${res.bytesWritten}/${res.contentLength}`);
-  
-          // Start playback when enough data is buffered (10% or 10MB)
-          if (res.bytesWritten > (res.contentLength * 0.1 || 10000000) && videoUrl !== `file://${tempFilePath.current}`) {
-            console.log('Buffering complete, starting playback');
-            setVideoUrl(`file://${tempFilePath.current}`);
+        startDownload,
+        (err) => {
+          if (err) {
+            if (!isUserCancelled.current) {
+              console.error('Streaming download failed after retries:', err);
+              setErrorMessage(`Streaming failed: ${err.message}`);
+              setShowAlert(true);
+            }
             setIsVideoLoading(false);
+            cleanupTempFile();
+            return;
           }
-        },
-      });
-  
-      streamingJobId.current = download.jobId;
-      console.log('Streaming job started:', streamingJobId.current);
-  
-      download.promise
-        .then(() => {
           console.log('Streaming download completed');
           setIsVideoLoading(false);
           streamingJobId.current = null;
-        })
-        .catch((err) => {
-          if (!isUserCancelled.current) {
-            console.error('Streaming download error:', err);
-            setErrorMessage(`Streaming failed: ${err.message}`);
-            setShowAlert(true);
-          }
-          setIsVideoLoading(false);
-          cleanupTempFile();
-        });
-  
+        }
+      );
     } catch (error) {
       console.error('Play error:', error.message);
       setErrorMessage(`Failed to start streaming: ${error.message}`);
@@ -493,7 +517,7 @@ const PlayScreen = () => {
 
   // Handle video errors
   const handleVideoError = (error) => {
-    console.log('Video error:', error);
+    console.log('Video error:', JSON.stringify(error));
     setErrorMessage('Failed to load video');
     setIsVideoLoading(false);
     cleanupTempFile();
@@ -505,7 +529,7 @@ const PlayScreen = () => {
       requestCancelDownload();
       return;
     }
-    setIsVideoLoading(false); // Ensure streaming stops
+    setIsVideoLoading(false);
     await cleanupTempFile();
     setInputLink('');
     setShowVideo(false);
@@ -519,6 +543,7 @@ const PlayScreen = () => {
     setDownloadProgress(0);
     setDownloadedBytes(0);
     setTotalBytes(0);
+    setIsMetadataLoaded(false);
   };
 
   // Clean up on component unmount
@@ -551,7 +576,7 @@ const PlayScreen = () => {
               autoCapitalize="none"
               returnKeyType="done"
             />
-            {!videoData ? (
+            {!isMetadataLoaded ? (
               <TouchableOpacity
                 style={[styles.submitButton, isLoading && styles.buttonDisabled]}
                 onPress={handleGetVideo}
@@ -567,7 +592,7 @@ const PlayScreen = () => {
           </View>
 
           {/* Video Metadata and Buttons */}
-          {videoData && !showVideo && (
+          {isMetadataLoaded && videoData && !showVideo && (
             <View style={styles.metadataContainer}>
               <Text style={styles.metadataTitle}>{videoData.title}</Text>
               <Text style={styles.metadataSize}>Size: {bytesToGB(videoData.size)} GB</Text>
@@ -601,10 +626,10 @@ const PlayScreen = () => {
                   controls={true}
                   resizeMode="contain"
                   bufferConfig={{
-                    minBufferMs: 15000,
-                    maxBufferMs: 50000,
-                    bufferForPlaybackMs: 2500,
-                    bufferForPlaybackAfterRebufferMs: 5000,
+                    minBufferMs: 30000,
+                    maxBufferMs: 60000,
+                    bufferForPlaybackMs: 5000,
+                    bufferForPlaybackAfterRebufferMs: 10000,
                   }}
                   onError={handleVideoError}
                   onBuffer={({ isBuffering }) => {
