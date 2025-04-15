@@ -34,7 +34,7 @@ const AnimatedAlert = ({ message, visible, onClose }) => {
       setIsHidden(false);
       timeout = setTimeout(() => {
         onClose();
-      }, 3000);
+      }, 5000);
     }
     return () => clearTimeout(timeout);
   }, [visible, onClose]);
