@@ -1,22 +1,21 @@
-even if app get closed but download should continued
 notification of download
-real time link updta e then insted of convert next show go to video or another approch disable any addition of link paste
-ui element and button  fixing
 
-fast cancel tapping
-play feature
 
-mobile back press working smoothly for all
-if any file is less than 100 mb then show size in mb for them
-progress bar for downloading 
-add loading after pressing downloading button 
 
 splash screen adding
 
 
 
-timeout error fixing 
-download pause and play option 
-real time downloading
 
+done:
+
+even if app get closed but download should continued
+real time link updta e then insted of convert next show go to video or another approch disable any addition of link paste
+ui element and button  fixing
+play feature
+fast cancel tapping
+if any file is less than 100 mb then show size in mb for them
+progress bar for downloading 
+add loading after pressing downloading button 
+timeout error fixing 
 acees without internet then show error of turn on internet 
